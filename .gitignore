@@ -1,0 +1,13 @@
+build/
+install/
+log/
+*.pyc
+__pycache__/
+*.so
+*.out
+.env
+.venv/
+.vscode/
+.idea/
+.DS_Store
+src/telekinesis/telekinesis/leap_hand_mesh_right/config.json
