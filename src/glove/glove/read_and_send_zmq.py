@@ -74,6 +74,8 @@ class GloveReader(Node):
             pose = Pose(position=position, orientation=orientation)
             skeleton_list.append(pose)
         output_array_msg = PoseArray()
+        output_array_msg.header.stamp = self.get_clock().now().to_msg()
+        output_array_msg.header.frame_id = "glove"
         output_array_msg.poses = skeleton_list
         side = self._resolve_side(data[0])
         if side == "left":
@@ -84,6 +86,8 @@ class GloveReader(Node):
     #This the dexcap style data, you only get the fingertip and the previous joint xyz as the data and then you can send that.  It goes from thumb_middle, thumb_tip, index_middle, index_tip etc.etc.
     def parse_short_skeleton_and_send(self, data):
         output_array_msg = PoseArray()
+        output_array_msg.header.stamp = self.get_clock().now().to_msg()
+        output_array_msg.header.frame_id = "glove"
         #short_idx = [3, 4, 8, 9, 13, 14, 18, 19, 23, 24] 
         ##Right now the integrated mode is in a different ordering, pinky, thumb, index, ring, middle
         ##Will be fixed to match the SDK in a future release
@@ -116,6 +120,7 @@ def main(args=None):
                 #If joint level data
                 if len(data) == 40:
                     stater_msg = JointState()
+                    stater_msg.header.stamp = glove_reader.get_clock().now().to_msg()
                     stater_msg.position = list(map(float,data[0:20]))
                     glove_reader.pub_left.publish(stater_msg)
                     stater_msg.position = list(map(float,data[20:40]))
