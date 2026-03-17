@@ -103,12 +103,13 @@ class LeapDirectControl(Node):
         self.declare_parameter("thumb_ik_y_scale", 1.0)
         self.declare_parameter("thumb_ik_z_scale", -1.0)
         self.declare_parameter("thumb_target_ema_alpha", 0.35)
-        self.declare_parameter("thumb_ik_blend", 0.8)
+        # A lower blend keeps the mapped posture meaningful while still stabilizing thumb IK.
+        self.declare_parameter("thumb_ik_blend", 0.55)
         self.declare_parameter("thumb_ik_max_iters", 40)
         self.declare_parameter("thumb_use_mid_as_secondary", False)
         self.declare_parameter("thumb_ik_update_hz", 20.0)
         self.declare_parameter("thumb_ik_target_deadband_m", 0.0035)
-        self.declare_parameter("thumb_ik_q_alpha", 0.30)
+        self.declare_parameter("thumb_ik_q_alpha", 0.20)
 
         self.declare_parameter("auto_zero_calibration", True)
         self.declare_parameter("zero_sample_count", 50)
@@ -137,21 +138,22 @@ class LeapDirectControl(Node):
         self.declare_parameter("thumb_dip_from_pip_ratio", 0.80)
 
         self.declare_parameter("finger_gain", 1.05)
-        self.declare_parameter("spread_gain", 0.45)
+        self.declare_parameter("spread_gain", 0.20)
         self.declare_parameter("thumb_spread_gain", 1.35)
-        self.declare_parameter("thumb_mcp_gain", 1.45)
-        self.declare_parameter("thumb_pip_gain", 1.45)
-        self.declare_parameter("thumb_dip_gain", 1.35)
+        self.declare_parameter("thumb_mcp_gain", 1.80)
+        self.declare_parameter("thumb_pip_gain", 1.95)
+        self.declare_parameter("thumb_dip_gain", 1.70)
         self.declare_parameter("thumb_spread_sign", 1.0)
         self.declare_parameter("thumb_flex_sign", 1.0)
-        self.declare_parameter("index_spread_sign", 1.0)
-        self.declare_parameter("middle_spread_sign", 1.0)
+        # Default signs here are tuned for the right hand. If you use the left hand, set them via ROS params.
+        self.declare_parameter("index_spread_sign", -1.0)
+        self.declare_parameter("middle_spread_sign", -1.0)
         self.declare_parameter("index_flex_sign", 1.0)
         self.declare_parameter("middle_flex_sign", 1.0)
         self.declare_parameter("ring_flex_sign", 1.0)
-        self.declare_parameter("index_spread_bias_deg", -3.0)
-        self.declare_parameter("ring_spread_bias_deg", 4.0)
-        self.declare_parameter("ring_spread_sign", -1.0)
+        self.declare_parameter("index_spread_bias_deg", 0.0)
+        self.declare_parameter("ring_spread_bias_deg", 0.0)
+        self.declare_parameter("ring_spread_sign", 1.0)
 
     def _load_params(self) -> None:
         is_left_new = bool(self.get_parameter("is_left").value)
@@ -244,7 +246,8 @@ class LeapDirectControl(Node):
         self._rx_manus = 0
         self._rx_glove = 0
         self._rx_short = 0
-        self._last_unit_mode = "deg"
+        # Internal tracking for auto unit detection; prefer rad until we see values clearly in degrees.
+        self._last_unit_mode = "rad"
         self._last_side_raw = ""
         self._stats_timer_s = 0.0
         self._latest_ang = None
@@ -338,11 +341,12 @@ class LeapDirectControl(Node):
             return float(value)
         return float(value) * (np.pi / 180.0)
 
-    def _deadzone_deg(self, value_deg: float, *, is_spread: bool = False) -> float:
-        threshold = self.spread_deadzone_deg if is_spread else self.input_deadzone_deg
-        if abs(value_deg) < threshold:
+    def _deadzone_rad(self, value_rad: float, *, is_spread: bool = False) -> float:
+        threshold_deg = self.spread_deadzone_deg if is_spread else self.input_deadzone_deg
+        threshold = float(threshold_deg) * (np.pi / 180.0)
+        if abs(value_rad) < threshold:
             return 0.0
-        return value_deg
+        return value_rad
 
     def _clip_to_limits(self, q: np.ndarray) -> np.ndarray:
         return np.clip(np.asarray(q, dtype=float), self._joint_lower, self._joint_upper)
@@ -489,75 +493,84 @@ class LeapDirectControl(Node):
             "ThumbMCPStretch",
         ]
         if self.input_angle_unit == "auto":
+            # Heuristic: values above ~3.2 strongly indicate degrees (since 3.2 rad ~ 183 deg).
+            # Keep previous unit mode otherwise to avoid mode-flapping when values are small.
             vals = [abs(float(ang[k])) for k in stretch_and_spread_keys if k in ang]
-            if vals and max(vals) <= 3.2:
-                self._last_unit_mode = "rad"
-            else:
+            if vals and max(vals) > 3.2:
                 self._last_unit_mode = "deg"
         elif self.input_angle_unit == "rad":
             self._last_unit_mode = "rad"
         else:
             self._last_unit_mode = "deg"
 
-        def get_deg(key: str, default: float = 0.0, is_spread: bool = False) -> float:
-            return self._deadzone_deg(float(ang.get(key, default)), is_spread=is_spread)
+        def get_rad(key: str, default: float = 0.0, is_spread: bool = False) -> float:
+            v_raw = float(ang.get(key, default))
+            v_rad = self._to_rad(v_raw)
+            return self._deadzone_rad(v_rad, is_spread=is_spread)
 
         index_spread = (
             self.index_spread_sign
-            * self._to_rad(get_deg("IndexSpread", is_spread=True) + self.index_spread_bias_deg)
+            * (
+                get_rad("IndexSpread", is_spread=True)
+                + float(self.index_spread_bias_deg) * (np.pi / 180.0)
+            )
             * self.spread_gain
         )
-        index_mcp = self.index_flex_sign * self._to_rad(get_deg("IndexMCPStretch")) * self.finger_gain
+        index_mcp = self.index_flex_sign * get_rad("IndexMCPStretch") * self.finger_gain
         # Internal order follows URDF order: [Spread, MCP, PIP, DIP].
         q[0] = index_spread
         q[1] = index_mcp
-        q[2] = self.index_flex_sign * self._to_rad(get_deg("IndexPIPStretch")) * self.finger_gain
+        q[2] = self.index_flex_sign * get_rad("IndexPIPStretch") * self.finger_gain
         if self.use_pip_from_mcp_fallback and abs(q[2]) < abs(index_mcp) * self.pip_from_mcp_min_ratio:
             q[2] = index_mcp * self.pip_from_mcp_ratio
         if self.use_dip_from_pip:
             q[3] = q[2] * self.dip_from_pip_ratio
         else:
-            q[3] = self.index_flex_sign * self._to_rad(get_deg("IndexDIPStretch", get_deg("IndexPIPStretch"))) * self.finger_gain
+            q[3] = self.index_flex_sign * get_rad("IndexDIPStretch", float(ang.get("IndexPIPStretch", 0.0))) * self.finger_gain
 
-        middle_spread = self.middle_spread_sign * self._to_rad(get_deg("MiddleSpread", is_spread=True)) * self.spread_gain
-        middle_mcp = self.middle_flex_sign * self._to_rad(get_deg("MiddleMCPStretch")) * self.finger_gain
+        middle_spread = self.middle_spread_sign * get_rad("MiddleSpread", is_spread=True) * self.spread_gain
+        middle_mcp = self.middle_flex_sign * get_rad("MiddleMCPStretch") * self.finger_gain
         q[4] = middle_spread if self.use_middle_spread else 0.0
         q[5] = middle_mcp
-        q[6] = self.middle_flex_sign * self._to_rad(get_deg("MiddlePIPStretch")) * self.finger_gain
+        q[6] = self.middle_flex_sign * get_rad("MiddlePIPStretch") * self.finger_gain
         if self.use_pip_from_mcp_fallback and abs(q[6]) < abs(middle_mcp) * self.pip_from_mcp_min_ratio:
             q[6] = middle_mcp * self.pip_from_mcp_ratio
         if self.use_dip_from_pip:
             q[7] = q[6] * self.dip_from_pip_ratio
         else:
-            q[7] = self.middle_flex_sign * self._to_rad(get_deg("MiddleDIPStretch", get_deg("MiddlePIPStretch"))) * self.finger_gain
+            q[7] = self.middle_flex_sign * get_rad("MiddleDIPStretch", float(ang.get("MiddlePIPStretch", 0.0))) * self.finger_gain
 
         ring_spread = (
             self.ring_spread_sign
-            * self._to_rad(get_deg("RingSpread", is_spread=True) + self.ring_spread_bias_deg)
+            * (
+                get_rad("RingSpread", is_spread=True)
+                + float(self.ring_spread_bias_deg) * (np.pi / 180.0)
+            )
             * self.spread_gain
         )
-        ring_mcp = self.ring_flex_sign * self._to_rad(get_deg("RingMCPStretch")) * self.finger_gain
+        ring_mcp = self.ring_flex_sign * get_rad("RingMCPStretch") * self.finger_gain
         q[8] = ring_spread
         q[9] = ring_mcp
-        q[10] = self.ring_flex_sign * self._to_rad(get_deg("RingPIPStretch")) * self.finger_gain
+        q[10] = self.ring_flex_sign * get_rad("RingPIPStretch") * self.finger_gain
         if self.use_pip_from_mcp_fallback and abs(q[10]) < abs(ring_mcp) * self.pip_from_mcp_min_ratio:
             q[10] = ring_mcp * self.pip_from_mcp_ratio
         if self.use_dip_from_pip:
             q[11] = q[10] * self.dip_from_pip_ratio
         else:
-            q[11] = self.ring_flex_sign * self._to_rad(get_deg("RingDIPStretch", get_deg("RingPIPStretch"))) * self.finger_gain
+            q[11] = self.ring_flex_sign * get_rad("RingDIPStretch", float(ang.get("RingPIPStretch", 0.0))) * self.finger_gain
 
         # Manus ROS2 uses ThumbMCPSpread, not ThumbSpread.
-        thumb_spread_deg = get_deg("ThumbMCPSpread", get_deg("ThumbSpread"), is_spread=True)
-        q[12] = self.thumb_spread_sign * self._to_rad(thumb_spread_deg) * self.thumb_spread_gain
-        q[13] = self.thumb_flex_sign * self._to_rad(get_deg("ThumbMCPStretch")) * self.thumb_mcp_gain
-        q[14] = self.thumb_flex_sign * self._to_rad(get_deg("ThumbPIPStretch")) * self.thumb_pip_gain
+        thumb_spread_raw_default = float(ang.get("ThumbSpread", 0.0))
+        thumb_spread = get_rad("ThumbMCPSpread", thumb_spread_raw_default, is_spread=True)
+        q[12] = self.thumb_spread_sign * thumb_spread * self.thumb_spread_gain
+        q[13] = self.thumb_flex_sign * get_rad("ThumbMCPStretch") * self.thumb_mcp_gain
+        q[14] = self.thumb_flex_sign * get_rad("ThumbPIPStretch") * self.thumb_pip_gain
         if abs(q[14]) < abs(q[13]) * self.thumb_pip_from_mcp_min_ratio:
             q[14] = q[13] * self.thumb_pip_from_mcp_ratio
         if self.thumb_use_dip_coupling:
             q[15] = q[14] * self.thumb_dip_from_pip_ratio
         else:
-            q[15] = self.thumb_flex_sign * self._to_rad(get_deg("ThumbDIPStretch")) * self.thumb_dip_gain
+            q[15] = self.thumb_flex_sign * get_rad("ThumbDIPStretch") * self.thumb_dip_gain
 
         return q
 

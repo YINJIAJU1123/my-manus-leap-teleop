@@ -10,4 +10,4 @@ set +u
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 set -u
-ros2 launch "$REPO_ROOT/launch/leap_v1_ik.py"
+ros2 launch "$REPO_ROOT/launch/leap_v1_ik.py" "$@"
