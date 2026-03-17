@@ -49,6 +49,7 @@ class LeapDirectControl(Node):
 
         self._connect_pybullet()
         self._load_hand_urdf()
+        self._init_debug_targets()
 
         self.pub_hand = self.create_publisher(JointState, self.cmd_topic, 20)
         self.sub_angles = []
@@ -121,12 +122,16 @@ class LeapDirectControl(Node):
         self.declare_parameter("target_glove_id", -1)
         self.declare_parameter("publish_rate_hz", 120.0)
         self.declare_parameter("command_timeout_s", 0.25)
-        self.declare_parameter("ema_alpha", 0.4)
-        self.declare_parameter("max_delta_rad", 0.06)
+        # Output smoothing (for stability and better teleop feel).
+        self.declare_parameter("ema_alpha", 0.25)
+        self.declare_parameter("max_delta_rad", 0.03)
         self.declare_parameter("input_deadzone_deg", 0.5)
         self.declare_parameter("spread_deadzone_deg", 3.0)
         self.declare_parameter("input_angle_unit", "auto")  # auto|deg|rad
         self.declare_parameter("debug_stats", True)
+        self.declare_parameter("output_scale", 1.0)
+        self.declare_parameter("debug_pb_targets", False)
+        self.declare_parameter("debug_pb_target_radius", 0.008)
         self.declare_parameter("use_dip_from_pip", True)
         self.declare_parameter("dip_from_pip_ratio", 0.85)
         self.declare_parameter("use_pip_from_mcp_fallback", True)
@@ -213,6 +218,9 @@ class LeapDirectControl(Node):
         if self.input_angle_unit not in ("auto", "deg", "rad"):
             self.input_angle_unit = "auto"
         self.debug_stats = bool(self.get_parameter("debug_stats").value)
+        self.output_scale = float(max(self.get_parameter("output_scale").value, 0.0))
+        self.debug_pb_targets = bool(self.get_parameter("debug_pb_targets").value)
+        self.debug_pb_target_radius = float(max(self.get_parameter("debug_pb_target_radius").value, 0.001))
         self.use_dip_from_pip = bool(self.get_parameter("use_dip_from_pip").value)
         self.dip_from_pip_ratio = float(np.clip(self.get_parameter("dip_from_pip_ratio").value, 0.0, 1.5))
         self.use_pip_from_mcp_fallback = bool(self.get_parameter("use_pip_from_mcp_fallback").value)
@@ -281,6 +289,9 @@ class LeapDirectControl(Node):
         self._last_thumb_ik_target = None
         self._last_thumb_ik_q = None
 
+        self._pb_dbg_thumb_tip = None
+        self._pb_dbg_thumb_mid = None
+
     def _connect_pybullet(self) -> None:
         self._pb_client = p.connect(p.GUI if self.use_sim else p.DIRECT)
         if self._pb_client < 0:
@@ -289,6 +300,43 @@ class LeapDirectControl(Node):
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self._pb_client)
         p.setGravity(0, 0, 0, physicsClientId=self._pb_client)
         p.setRealTimeSimulation(0, physicsClientId=self._pb_client)
+
+    def _init_debug_targets(self) -> None:
+        if not self.use_sim or not self.debug_pb_targets:
+            return
+        try:
+            r = float(self.debug_pb_target_radius)
+            vis_tip = p.createVisualShape(
+                p.GEOM_SPHERE,
+                radius=r,
+                rgbaColor=[1.0, 0.2, 0.2, 0.9],
+                physicsClientId=self._pb_client,
+            )
+            vis_mid = p.createVisualShape(
+                p.GEOM_SPHERE,
+                radius=r,
+                rgbaColor=[0.2, 1.0, 0.2, 0.9],
+                physicsClientId=self._pb_client,
+            )
+            self._pb_dbg_thumb_tip = p.createMultiBody(
+                baseMass=0.0,
+                baseVisualShapeIndex=vis_tip,
+                basePosition=[0.3, 0.3, 0.3],
+                physicsClientId=self._pb_client,
+            )
+            self._pb_dbg_thumb_mid = p.createMultiBody(
+                baseMass=0.0,
+                baseVisualShapeIndex=vis_mid,
+                basePosition=[0.3, 0.3, 0.3],
+                physicsClientId=self._pb_client,
+            )
+            for bid in (self._pb_dbg_thumb_tip, self._pb_dbg_thumb_mid):
+                p.setCollisionFilterGroupMask(bid, -1, 0, 0, physicsClientId=self._pb_client)
+            self.get_logger().info("PyBullet debug targets enabled (thumb tip/mid).")
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to init PyBullet debug targets: {exc}")
+            self._pb_dbg_thumb_tip = None
+            self._pb_dbg_thumb_mid = None
 
     def _resolve_urdf_path(self) -> str:
         env_path = os.environ.get("LEAP_URDF_PATH", "").strip()
@@ -684,6 +732,20 @@ class LeapDirectControl(Node):
             tip_t = self._transform_short_xyz(tip_raw)
             self._thumb_mid_target = self._thumb_mid_filter.update(mid_t)
             self._thumb_tip_target = self._thumb_tip_filter.update(tip_t)
+            if self.use_sim and self.debug_pb_targets and self._pb_dbg_thumb_tip is not None:
+                p.resetBasePositionAndOrientation(
+                    self._pb_dbg_thumb_tip,
+                    [float(x) for x in self._thumb_tip_target],
+                    [0.0, 0.0, 0.0, 1.0],
+                    physicsClientId=self._pb_client,
+                )
+            if self.use_sim and self.debug_pb_targets and self._pb_dbg_thumb_mid is not None:
+                p.resetBasePositionAndOrientation(
+                    self._pb_dbg_thumb_mid,
+                    [float(x) for x in self._thumb_mid_target],
+                    [0.0, 0.0, 0.0, 1.0],
+                    physicsClientId=self._pb_client,
+                )
         except Exception as exc:
             self.get_logger().error(f"Short pose parsing failed: {exc}")
 
@@ -706,19 +768,20 @@ class LeapDirectControl(Node):
                 f"zero_done={self._zero_done}, cmd_max={float(np.max(np.abs(self.cmd_joints))):.3f} rad"
             )
 
+        q_out = np.asarray(self.cmd_joints, dtype=float) * float(self.output_scale)
         if self.use_sim:
             for i in range(16):
                 p.resetJointState(
                     self.leap_id,
                     i,
-                    float(self.cmd_joints[i]),
+                    float(q_out[i]),
                     physicsClientId=self._pb_client,
                 )
             p.stepSimulation(physicsClientId=self._pb_client)
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.position = [float(x) for x in self._to_publish_order(self.cmd_joints)]
+        msg.position = [float(x) for x in self._to_publish_order(q_out)]
         self.pub_hand.publish(msg)
 
     def destroy_node(self):

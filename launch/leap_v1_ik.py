@@ -13,6 +13,12 @@ def generate_launch_description():
     glove_finger_order = LaunchConfiguration("glove_joint_finger_order")
     thumb_short_mid_index = LaunchConfiguration("thumb_short_mid_index")
     thumb_short_tip_index = LaunchConfiguration("thumb_short_tip_index")
+    ema_alpha = LaunchConfiguration("ema_alpha")
+    max_delta_rad = LaunchConfiguration("max_delta_rad")
+    finger_gain = LaunchConfiguration("finger_gain")
+    spread_gain = LaunchConfiguration("spread_gain")
+    output_scale = LaunchConfiguration("output_scale")
+    debug_pb_targets = LaunchConfiguration("debug_pb_targets")
 
     # Tuned defaults for RIGHT hand (is_left=false).
     index_spread_sign = LaunchConfiguration("index_spread_sign")
@@ -23,13 +29,21 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("is_left", default_value="false"),
             DeclareLaunchArgument("use_sim", default_value="true"),
-            # For glove joint fallback, Manus SDK commonly outputs radians. If your values look like degrees, set to "deg".
-            DeclareLaunchArgument("input_angle_unit", default_value="rad"),
+            # Set to "rad" or "deg" if you know the unit; otherwise keep "auto".
+            DeclareLaunchArgument("input_angle_unit", default_value="auto"),
             DeclareLaunchArgument("publish_swap_mcp_spread_order", default_value="true"),
             DeclareLaunchArgument("glove_joint_parse_mode", default_value="legacy16"),
             DeclareLaunchArgument("glove_joint_finger_order", default_value="thumb,index,middle,ring,pinky"),
-            DeclareLaunchArgument("thumb_short_mid_index", default_value="0"),
-            DeclareLaunchArgument("thumb_short_tip_index", default_value="1"),
+            # NOTE: read_and_send_zmq.py currently publishes short skeleton in order: pinky, thumb, index, ring, middle.
+            # So the thumb indices are 2 (mid) and 3 (tip).
+            DeclareLaunchArgument("thumb_short_mid_index", default_value="2"),
+            DeclareLaunchArgument("thumb_short_tip_index", default_value="3"),
+            DeclareLaunchArgument("ema_alpha", default_value="0.25"),
+            DeclareLaunchArgument("max_delta_rad", default_value="0.03"),
+            DeclareLaunchArgument("finger_gain", default_value="1.0"),
+            DeclareLaunchArgument("spread_gain", default_value="0.20"),
+            DeclareLaunchArgument("output_scale", default_value="1.0"),
+            DeclareLaunchArgument("debug_pb_targets", default_value="false"),
             DeclareLaunchArgument("index_spread_sign", default_value="-1.0"),
             DeclareLaunchArgument("middle_spread_sign", default_value="-1.0"),
             DeclareLaunchArgument("ring_spread_sign", default_value="1.0"),
@@ -55,6 +69,12 @@ def generate_launch_description():
                     {"glove_joint_finger_order": glove_finger_order},
                     {"thumb_short_mid_index": thumb_short_mid_index},
                     {"thumb_short_tip_index": thumb_short_tip_index},
+                    {"ema_alpha": ema_alpha},
+                    {"max_delta_rad": max_delta_rad},
+                    {"finger_gain": finger_gain},
+                    {"spread_gain": spread_gain},
+                    {"output_scale": output_scale},
+                    {"debug_pb_targets": debug_pb_targets},
                     {"index_spread_sign": index_spread_sign},
                     {"middle_spread_sign": middle_spread_sign},
                     {"ring_spread_sign": ring_spread_sign},
